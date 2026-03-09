@@ -65,7 +65,7 @@ void UBTTask_FishMove::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMe
     if (!FinalDirection.IsNearlyZero())
     {
         FRotator TargetRot = FinalDirection.Rotation();
-        FRotator NewRot = FMath::RInterpTo(Fish->GetActorRotation(), TargetRot, DeltaSeconds, 3.0f);
+        FRotator NewRot = FMath::RInterpTo(Fish->GetActorRotation(), TargetRot, DeltaSeconds, 1.0f);
         Fish->SetActorRotation(NewRot);
     }
 }

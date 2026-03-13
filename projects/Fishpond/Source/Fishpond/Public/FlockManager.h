@@ -20,22 +20,22 @@ public:
 
     FVector GetFlockForce(ACharacter* RequestingFish);
 
-    UPROPERTY(EditAnywhere, Category = "Flocking")
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Flocking")
     float SeparationRadius = 150.f;
 
-    UPROPERTY(EditAnywhere, Category = "Flocking")
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Flocking")
     float AlignmentRadius = 300.f;
 
-    UPROPERTY(EditAnywhere, Category = "Flocking")
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Flocking")
     float CohesionRadius = 300.f;
 
-    UPROPERTY(EditAnywhere, Category = "Flocking")
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Flocking")
     float SeparationWeight = 1.5f;
 
-    UPROPERTY(EditAnywhere, Category = "Flocking")
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Flocking")
     float AlignmentWeight = 1.0f;
 
-    UPROPERTY(EditAnywhere, Category = "Flocking")
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Flocking")
     float CohesionWeight = 1.0f;
 
 protected:

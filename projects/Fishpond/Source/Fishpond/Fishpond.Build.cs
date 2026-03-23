@@ -12,12 +12,13 @@ public class Fishpond : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
 
-		// Uncomment if you are using Slate UI
-		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
-		
-		// Uncomment if you are using online features
-		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
+        // RealSense SDK
+        string RealSenseSDKPath = "D:/RealSense SDK 2.0";
+        string DLLPath = RealSenseSDKPath + "/bin/x64/realsense2.dll";
 
-		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
-	}
+        PublicSystemIncludePaths.Add(RealSenseSDKPath + "/include");
+        PublicAdditionalLibraries.Add(RealSenseSDKPath + "/lib/x64/realsense2.lib");
+        RuntimeDependencies.Add("$(BinaryOutputDir)/realsense2.dll", DLLPath);
+
+    }
 }

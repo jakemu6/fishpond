@@ -1,5 +1,4 @@
 #include "RealSenseComponent.h"
-#include "Kismet/GameplayStatics.h"
 
 URealSenseComponent::URealSenseComponent()
 {
@@ -9,6 +8,17 @@ URealSenseComponent::URealSenseComponent()
 void URealSenseComponent::BeginPlay()
 {
     Super::BeginPlay();
+
+    // Create the procedural mesh on our owner actor
+    MeshComponent = NewObject<UProceduralMeshComponent>(GetOwner(), TEXT("DepthMesh"));
+    MeshComponent->bUseAsyncCooking = true;
+    MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    MeshComponent->SetCollisionObjectType(ECollisionChannel::ECC_WorldStatic);
+    MeshComponent->RegisterComponent();
+    MeshComponent->AttachToComponent(
+        GetOwner()->GetRootComponent(),
+        FAttachmentTransformRules::KeepRelativeTransform);
+
     StartCamera();
 }
 
@@ -22,15 +32,9 @@ bool URealSenseComponent::StartCamera()
 {
     try
     {
-        Align.Emplace(RS2_STREAM_COLOR);
-
-        // Enable depth and color streams
         Config.enable_stream(RS2_STREAM_DEPTH, 640, 480, RS2_FORMAT_Z16, 30);
-        Config.enable_stream(RS2_STREAM_COLOR, 640, 480, RS2_FORMAT_BGR8, 30);
-
         Pipeline.start(Config);
         bCameraRunning = true;
-
         UE_LOG(LogTemp, Log, TEXT("RealSense: Camera started successfully"));
         return true;
     }
@@ -69,102 +73,144 @@ void URealSenseComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
     try
     {
-        // Poll for frames without blocking
         rs2::frameset Frames;
-        if (Pipeline.poll_for_frames(&Frames) != 0)
+        if (Pipeline.poll_for_frames(&Frames))
         {
             ProcessDepthFrame(Frames);
         }
     }
     catch (const rs2::error& e)
     {
-        UE_LOG(LogTemp, Warning, TEXT("RealSense: Frame error: %s"),
-            *FString(e.what()));
+        UE_LOG(LogTemp, Warning, TEXT("RealSense: Frame error: %s"), *FString(e.what()));
+    }
+
+    // Rebuild the mesh on the configured interval
+    TimeSinceLastMeshUpdate += DeltaTime;
+    if (TimeSinceLastMeshUpdate >= MeshUpdateInterval && RawDepthData.Num() > 0)
+    {
+        RebuildMesh();
+        TimeSinceLastMeshUpdate = 0.f;
     }
 }
 
 void URealSenseComponent::ProcessDepthFrame(const rs2::frameset& Frames)
 {
-    // Align depth to color frame
-    auto AlignedFrames = Align.GetValue().process(Frames);
-    auto DepthFrame = AlignedFrames.get_depth_frame();
-
+    auto DepthFrame = Frames.get_depth_frame();
     if (!DepthFrame) return;
 
-    int Width  = DepthFrame.get_width();
-    int Height = DepthFrame.get_height();
+    const int CamW = DepthFrame.get_width();
+    const int CamH = DepthFrame.get_height();
 
-    // Sample the center region of the frame for player detection
-    int CenterX = Width  / 2;
-    int CenterY = Height / 2;
-    int RegionSize = 20;
+    const int ResX = FMath::Max(MeshResX, 2);
+    const int ResY = FMath::Max(MeshResY, 2);
 
-    float ClosestDepth = MaxDepth;
-    float SumX = 0.f, SumY = 0.f, SumZ = 0.f;
-    int ValidSamples = 0;
+    RawDepthData.SetNumUninitialized(ResX * ResY);
 
-    // Get depth intrinsics for deprojection
-    auto DepthIntrinsics = DepthFrame.get_profile()
-        .as<rs2::video_stream_profile>().get_intrinsics();
-
-    for (int Y = CenterY - RegionSize; Y < CenterY + RegionSize; Y++)
+    // Downsample: for each grid cell, sample the corresponding camera pixel
+    for (int GY = 0; GY < ResY; ++GY)
     {
-        for (int X = CenterX - RegionSize; X < CenterX + RegionSize; X++)
+        for (int GX = 0; GX < ResX; ++GX)
         {
-            float Depth = DepthFrame.get_distance(X, Y);
+            const int PX = FMath::Clamp((int)((GX + 0.5f) / ResX * CamW), 0, CamW - 1);
+            const int PY = FMath::Clamp((int)((GY + 0.5f) / ResY * CamH), 0, CamH - 1);
 
-            if (Depth > MinDepth && Depth < MaxDepth)
-            {
-                // Deproject pixel to 3D point
-                float Pixel[2] = { (float)X, (float)Y };
-                float Point[3];
-                rs2_deproject_pixel_to_point(Point, &DepthIntrinsics, Pixel, Depth);
+            float D = DepthFrame.get_distance(PX, PY);
 
-                SumX += Point[0];
-                SumY += Point[1];
-                SumZ += Point[2];
-                ValidSamples++;
+            // Zero or out-of-range reads fall back to MaxDepth (flat background)
+            if (D < MinDepth || D <= 0.f)
+                D = MaxDepth;
+            else if (D > MaxDepth)
+                D = MaxDepth;
 
-                if (Depth < ClosestDepth)
-                    ClosestDepth = Depth;
-            }
+            RawDepthData[GY * ResX + GX] = D;
+        }
+    }
+}
+
+void URealSenseComponent::RebuildMesh()
+{
+    if (!MeshComponent) return;
+
+    const int ResX = FMath::Max(MeshResX, 2);
+    const int ResY = FMath::Max(MeshResY, 2);
+
+    const int VertCount = ResX * ResY;
+    TArray<FVector> Vertices;
+    TArray<FVector> Normals;
+    TArray<FVector2D> UVs;
+    TArray<int32> Triangles;
+
+    Vertices.SetNumUninitialized(VertCount);
+    Normals.SetNumUninitialized(VertCount);
+    UVs.SetNumUninitialized(VertCount);
+
+    const float StepX = MeshWorldWidth  / (ResX - 1);
+    const float StepY = MeshWorldHeight / (ResY - 1);
+
+    // Build vertex positions
+    // X/Y spread across the mesh plane, Z = depth displacement
+    // Closer objects (lower depth) produce a higher Z, pushing toward the fish
+    for (int GY = 0; GY < ResY; ++GY)
+    {
+        for (int GX = 0; GX < ResX; ++GX)
+        {
+            const float D = RawDepthData[GY * ResX + GX];
+            const float Z = (MaxDepth - D) * DepthToUnrealScale;
+
+            Vertices[GY * ResX + GX] = FVector(
+                GX * StepX - MeshWorldWidth  * 0.5f,
+                GY * StepY - MeshWorldHeight * 0.5f,
+                Z
+            );
+
+            UVs[GY * ResX + GX] = FVector2D(
+                (float)GX / (ResX - 1),
+                (float)GY / (ResY - 1)
+            );
         }
     }
 
-    bool bCurrentlyTracking = ValidSamples > 0;
-
-    if (bCurrentlyTracking)
+    // Build triangles (two triangles per quad)
+    Triangles.Reserve((ResX - 1) * (ResY - 1) * 6);
+    for (int GY = 0; GY < ResY - 1; ++GY)
     {
-        // Average the sampled points
-        float AvgX = SumX / ValidSamples;
-        float AvgY = SumY / ValidSamples;
-        float AvgZ = SumZ / ValidSamples;
+        for (int GX = 0; GX < ResX - 1; ++GX)
+        {
+            const int I00 =  GY      * ResX + GX;
+            const int I10 =  GY      * ResX + GX + 1;
+            const int I01 = (GY + 1) * ResX + GX;
+            const int I11 = (GY + 1) * ResX + GX + 1;
 
-        TrackedPlayer.Position = RealSenseToUnreal(AvgX, AvgY, AvgZ);
-        TrackedPlayer.Depth    = ClosestDepth;
-        TrackedPlayer.bIsValid = true;
+            Triangles.Add(I00); Triangles.Add(I01); Triangles.Add(I10);
+            Triangles.Add(I10); Triangles.Add(I01); Triangles.Add(I11);
+        }
+    }
 
-        OnPlayerDetected.Broadcast(TrackedPlayer);
+    // Compute per-vertex normals via central differences
+    for (int GY = 0; GY < ResY; ++GY)
+    {
+        for (int GX = 0; GX < ResX; ++GX)
+        {
+            const FVector& VL = Vertices[GY * ResX + FMath::Max(GX - 1, 0)];
+            const FVector& VR = Vertices[GY * ResX + FMath::Min(GX + 1, ResX - 1)];
+            const FVector& VD = Vertices[FMath::Max(GY - 1, 0) * ResX + GX];
+            const FVector& VU = Vertices[FMath::Min(GY + 1, ResY - 1) * ResX + GX];
+
+            const FVector Tangent = (VR - VL).GetSafeNormal();
+            const FVector Bitangent = (VU - VD).GetSafeNormal();
+            Normals[GY * ResX + GX] = FVector::CrossProduct(Tangent, Bitangent).GetSafeNormal();
+        }
+    }
+
+    if (!bMeshInitialized)
+    {
+        MeshComponent->CreateMeshSection(0, Vertices, Triangles, Normals,
+            UVs, TArray<FColor>(), TArray<FProcMeshTangent>(), /*bCreateCollision=*/true);
+        bMeshInitialized = true;
     }
     else
     {
-        TrackedPlayer.bIsValid = false;
-
-        // Only fire lost event once when tracking is lost
-        if (bWasTrackingLastFrame)
-            OnPlayerLost.Broadcast();
+        MeshComponent->UpdateMeshSection(0, Vertices, Normals,
+            UVs, TArray<FColor>(), TArray<FProcMeshTangent>());
     }
-
-    bWasTrackingLastFrame = bCurrentlyTracking;
-}
-
-FVector URealSenseComponent::RealSenseToUnreal(float X, float Y, float Z) const
-{
-    // RealSense uses right-handed Y-up coordinate system
-    // Unreal uses left-handed Z-up coordinate system
-    return FVector(
-         Z * DepthToUnrealScale,   // RealSense Z (forward) → Unreal X (forward)
-        -X * DepthToUnrealScale,   // RealSense X (right)   → Unreal Y (left-handed flip)
-        -Y * DepthToUnrealScale    // RealSense Y (down)    → Unreal Z (up, flipped)
-    ) + GetOwner()->GetActorLocation();
 }

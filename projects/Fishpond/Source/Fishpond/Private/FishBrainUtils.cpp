@@ -1,19 +1,22 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
-
 #include "FishBrainUtils.h"
 
 TArray<uint8> UFishBrainUtils::PackSenses(
     int32 FishId,
     float Pressure, float ObsLeft, float ObsRight,
-    float ObsFront, float ObsAbove, float ObsBelow)
+    float ObsFront, float ObsAbove, float ObsBelow,
+    float SchoolYaw, float SchoolPitch, float SchoolCrowd)
 {
     TArray<uint8> Bytes;
-    Bytes.SetNum(28);
+    Bytes.SetNum(40);
     uint32 Id = (uint32)FishId;
     FMemory::Memcpy(Bytes.GetData() + 0, &Id, 4);
-    float Values[6] = { Pressure, ObsLeft, ObsRight, ObsFront, ObsAbove, ObsBelow };
-    FMemory::Memcpy(Bytes.GetData() + 4, Values, 24);
+    float Values[9] = {
+        Pressure, ObsLeft, ObsRight, ObsFront, ObsAbove, ObsBelow,
+        SchoolYaw, SchoolPitch, SchoolCrowd
+    };
+    FMemory::Memcpy(Bytes.GetData() + 4, Values, 36);
     return Bytes;
 }
 
